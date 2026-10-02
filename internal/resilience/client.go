@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -134,7 +135,9 @@ func (c *Client) Call(ctx context.Context, method, url string, in, out any) erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	b.probing = false
-	if final != nil {
+	var responseError *Error
+	dependencyFailed := final != nil && !(errors.As(final, &responseError) && responseError.Status >= 400 && responseError.Status < 500 && responseError.Status != 429)
+	if dependencyFailed {
 		b.failures++
 		if b.failures >= 3 {
 			b.until = time.Now().Add(5 * time.Second)

@@ -11,7 +11,7 @@ This is a production-oriented local platform, not a production deployment certif
 - Worker state is an idempotent delivery projection, not real shipping. A published event may replay after publisher crash. DLQ entries require explicit operator replay/inspection.
 - Experiment interruption is recorded ABORTED and cleaned on control restart; durable jobs are not resumed. Runner watchdog is in memory. Combined process/host failures can require manual cleanup.
 - Order list/history endpoints are bounded to recent 100 rows, with no pagination/search. UI is deliberately functional and minimal. Metrics refresh every five seconds; SSE indicates connectivity and service events.
-- Schema initialization is an initial migration for new volumes, not an online migration manager. CI validates builds and limited tests; integration demo is explicitly executed locally, not automatically a large CI chaos suite.
+- Schema initialization is an initial migration for new volumes, not an online migration manager. CI validates builds, focused tests and one bounded integration demo; the updated workflow still requires its first GitHub execution.
 - Container/library versions are pinned. A frontend npm audit was checked during implementation; this does not imply all container dependencies have passed a comprehensive security assessment.
 
 Executed validation is recorded separately in validation.md. Implemented behavior must not be confused with behavior exercised successfully in this environment.

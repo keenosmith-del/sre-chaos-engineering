@@ -33,6 +33,7 @@ def main():
   if report['state'] in ('COMPLETED','FAILED','ABORTED'):break
   time.sleep(4)
  assert report['state']=='COMPLETED',json.dumps(report)
+ assert any(p.get('injection',{}).get('configuration_verified') for p in report['evidence']),'fault configuration not verified'
  phases={p['phase']:p for p in report['evidence'] if 'phase' in p};assert set(phases)=={'BASELINE','FAILURE','RECOVERY'}
  assert phases['FAILURE']['error_rate']['available'],'fault telemetry missing'
  assert phases['FAILURE']['error_rate']['value']>0,'fault had no measured effect'

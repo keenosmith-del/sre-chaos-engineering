@@ -36,7 +36,7 @@ func (s Spec) validate() error {
 	if s.Duration < 5 || s.Duration > 120 || s.Baseline < 10 || s.Baseline > 120 || s.Recovery < 10 || s.Recovery > 120 {
 		return errors.New("duration 5..120, baseline and recovery 10..120 seconds required")
 	}
-	if s.Magnitude < 0 || s.Magnitude > 3000 || s.StopErrorRate < .01 || s.StopErrorRate > 1 {
+	if s.Magnitude < 0 || s.Magnitude > 3000 || (s.Fault == "payment_latency" && s.Magnitude == 0) || s.StopErrorRate < .01 || s.StopErrorRate > 1 {
 		return errors.New("magnitude 0..3000 milliseconds, stop_error_rate .01..1 required")
 	}
 	return nil
@@ -345,9 +345,11 @@ func (c *controller) execute(id string, s Spec) {
 	if runErr = c.state(ctx, id, "INJECTING"); runErr != nil {
 		return
 	}
-	if runErr = c.runnerCall(ctx, "/inject", map[string]any{"fault": s.Fault, "magnitude": s.Magnitude, "duration": s.Duration}, nil); runErr != nil {
+	var injection map[string]any
+	if runErr = c.runnerCall(ctx, "/inject", map[string]any{"fault": s.Fault, "magnitude": s.Magnitude, "duration": s.Duration}, &injection); runErr != nil {
 		return
 	}
+	evidence = append(evidence, map[string]any{"injection": injection})
 	if runErr = c.state(ctx, id, "OBSERVING"); runErr != nil {
 		return
 	}
@@ -382,10 +384,36 @@ func (c *controller) execute(id string, s Spec) {
 		runErr = e
 		return
 	}
+	// Quiesce traffic before evaluating durable backlog and terminal invariants.
+	if e := c.stopLoad(cleanup); e != nil {
+		runErr = e
+		return
+	}
+	var replayed map[string]any
+	replayClient := resilience.New(20 * time.Second)
+	if e := replayClient.Call(ctx, "POST", "http://worker:8080/replay", nil, &replayed); e != nil {
+		runErr = e
+		return
+	}
+	evidence = append(evidence, map[string]any{"deadletter_replay": replayed})
+	if _, e := c.startLoad(ctx, "sustained", id); e != nil {
+		runErr = e
+		return
+	}
 	if !wait(s.Recovery) {
 		return
 	}
 	phase("RECOVERY", s.Recovery)
+	drainctx, dx := context.WithTimeout(ctx, 30*time.Second)
+	if e := c.stopLoad(drainctx); e != nil {
+		dx()
+		runErr = e
+		return
+	}
+	dx()
+	if !wait(3) {
+		return
+	}
 	verifyctx, vx := context.WithTimeout(context.Background(), 30*time.Second)
 	defer vx()
 	if e := c.state(verifyctx, id, "VERIFYING"); e != nil {

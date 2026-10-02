@@ -41,3 +41,18 @@ make backup and make restore-verify passed against quiescent final data: SHA-256
 RTO is an isolated PostgreSQL restore drill; RPO uses the documented order-creation watermark. This is not coordinated RabbitMQ recovery or a production service-recovery guarantee.
 
 Reports and detailed evidence are persisted in control PostgreSQL and under ignored artifacts/*.json. The backup artifact is in the backups named volume. Dead-letter replay returned replayed:0 against the empty queue; recovery of a nonempty poison/crash queue was not exercised. Long soak tests, exhaustive failures, kind runtime, production HA/security and coordinated recovery were not tested.
+
+## Fresh completion checkpoint — 2026-10-03 (Africa/Johannesburg)
+
+These results were executed in this checkpoint, separately from the historical checks above:
+
+- `make check` passed Go tests/build, TypeScript/Vite build, Compose configuration and Python syntax. The added focused circuit regression then passed, verifying expected 404 responses, outage opening and half-open recovery. Final control/runner images rebuilt successfully after the recovery adjustment.
+- Compose deployed successfully and configured service checks passed. Dashboard rendered six navigation areas, connected SSE, six ready services and real metric values. This was a short inspection, not a full browser-driven acceptance suite.
+- Concurrent order idempotency, changed-payload HTTP 409, real confirmation and deterministic decline/stock compensation passed.
+- Real trace `8acdc380d57f0a211b7305b8d0e36b38` returned ten spans across gateway, ordering, inventory, payments and worker.
+- First stronger verification correctly failed on a historical released diagnostic reservation. The check was corrected to reject active orphan reservations while preserving released diagnostics as explicit informational evidence. No historical data was deleted.
+- Final report `09bf1dbbe283689da16263dc3d24145e` completed with verified inventory proxy injection. Requests/s: 2.000 baseline, 1.999 failure, 2.000 recovery. HTTP error fraction: 0.000 / 0.667 / 0.000. p95 seconds: 0.048 / 0.275 / 0.040. Recovery consistency passed: 534 orders, 530 confirmed/delivered, four cancelled, zero outstanding, pending outbox, missing deliveries, active orphan reservations, negative stock or invariant violations. Fault-to-verification elapsed 32.352 seconds.
+- Isolated restore passed checksum, snapshot matching and restored consistency: 534 orders. Restore-drill RTO 1.318 seconds; order-watermark RPO zero; configured objectives met. Evidence is saved in `artifacts/experiment.json` and `artifacts/recovery.json` and persisted through the control API.
+- CI now includes this bounded integration journey and artifact upload; the changed workflow has not yet executed on GitHub.
+
+The other five presets were inspected but not rerun in this checkpoint; their earlier executions are recorded above. kind remains uninstalled and runtime-unverified. Nonempty DLQ replay was not exercised by this inventory demonstration. PostgreSQL interruption remains a proxy-network scenario, and restoration remains a PostgreSQL-only isolated drill.

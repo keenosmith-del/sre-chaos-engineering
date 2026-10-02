@@ -71,7 +71,10 @@ func process(a *platform.App, ctx context.Context, id string) error {
 	defer func() {
 		c, x := context.WithTimeout(context.Background(), time.Second)
 		defer x()
-		conn.Exec(c, "SELECT pg_advisory_unlock(hashtextextended($1,1))", id)
+		if _, err := conn.Exec(c, "SELECT pg_advisory_unlock(hashtextextended($1,1))", id); err != nil {
+			// Never return a session with an advisory lock to the pool.
+			conn.Conn().Close(c)
+		}
 	}()
 	o, e := scan(conn.QueryRow(ctx, "SELECT "+columns+" FROM ordering.orders WHERE id=$1", id))
 	if e != nil {
@@ -459,6 +462,7 @@ func publish(a *platform.App) {
 				} else {
 					tx.Rollback(ctx)
 				}
+				tx.Rollback(ctx)
 				x()
 				if e != nil {
 					return

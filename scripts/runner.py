@@ -10,7 +10,7 @@ FAULTS={'inventory_unavailable':'inventory','payment_latency':'payments','redis_
 PROFILES={'baseline','concurrent','sustained','burst','recovery'}
 GENERATION=0
 LOAD=None
-VERIFY_SQL="""SELECT json_build_object('orders',(SELECT count(*) FROM ordering.orders),'confirmed',(SELECT count(*) FROM ordering.orders WHERE state='CONFIRMED'),'cancelled',(SELECT count(*) FROM ordering.orders WHERE state='CANCELLED'),'outstanding',(SELECT count(*) FROM ordering.orders WHERE state NOT IN ('CONFIRMED','CANCELLED','FAILED')),'watermark',(SELECT coalesce(max(created_at)::text,'') FROM ordering.orders),'invariant_violations',(SELECT count(*) FROM ordering.orders o LEFT JOIN inventory.reservations i ON i.id=o.id LEFT JOIN payments.authorizations p ON p.id=o.id WHERE (o.state='CONFIRMED' AND (i.active IS DISTINCT FROM true OR p.status IS DISTINCT FROM 'AUTHORIZED')) OR (o.state='CANCELLED' AND i.active IS TRUE)),'negative_stock',(SELECT count(*) FROM inventory.products WHERE stock<0),'pending_events',(SELECT count(*) FROM ordering.outbox WHERE published_at IS NULL),'worker_deliveries',(SELECT count(*) FROM worker.deliveries))"""
+VERIFY_SQL="""SELECT json_build_object('orders',(SELECT count(*) FROM ordering.orders),'confirmed',(SELECT count(*) FROM ordering.orders WHERE state='CONFIRMED'),'cancelled',(SELECT count(*) FROM ordering.orders WHERE state='CANCELLED'),'outstanding',(SELECT count(*) FROM ordering.orders WHERE state NOT IN ('CONFIRMED','CANCELLED','FAILED')),'watermark',(SELECT coalesce(max(created_at)::text,'') FROM ordering.orders),'invariant_violations',(SELECT count(*) FROM ordering.orders o LEFT JOIN inventory.reservations i ON i.id=o.id LEFT JOIN payments.authorizations p ON p.id=o.id WHERE (o.state='CONFIRMED' AND (i.active IS DISTINCT FROM true OR p.status IS DISTINCT FROM 'AUTHORIZED' OR p.amount IS DISTINCT FROM o.amount OR i.product IS DISTINCT FROM o.product OR i.quantity IS DISTINCT FROM o.quantity)) OR (o.state='CANCELLED' AND (i.active IS DISTINCT FROM false OR p.status IS DISTINCT FROM 'DECLINED'))),'missing_deliveries',(SELECT count(*) FROM ordering.orders o LEFT JOIN worker.deliveries d ON d.id=o.id WHERE o.state='CONFIRMED' AND d.id IS NULL),'orphan_records',(SELECT count(*) FROM inventory.reservations i LEFT JOIN ordering.orders o ON o.id=i.id WHERE o.id IS NULL AND i.active),'released_diagnostic_reservations',(SELECT count(*) FROM inventory.reservations i LEFT JOIN ordering.orders o ON o.id=i.id WHERE o.id IS NULL AND NOT i.active),'negative_stock',(SELECT count(*) FROM inventory.products WHERE stock<0),'pending_events',(SELECT count(*) FROM ordering.outbox WHERE published_at IS NULL),'worker_deliveries',(SELECT count(*) FROM worker.deliveries))"""
 def run(args,data=None,timeout=90):
  p=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
  if p.returncode: raise RuntimeError(p.stderr.decode()[-2000:])
@@ -53,13 +53,19 @@ def inject(v):
   with LOCK:
    if generation==GENERATION:cleanup()
  threading.Thread(target=expire,daemon=True).start()
- return {'injected':fault,'cleanup_deadline_seconds':duration+5}
+ if fault=='worker_restart':
+  observed=json.loads(run(['docker','inspect',container('worker')]))[0]['State']['Running'] is False
+ else:
+  proxy=tox('/proxies/'+FAULTS[fault],method='GET')
+  observed=any(t['name']=='experiment_latency' and t['attributes']['latency']==m for t in proxy.get('toxics',[])) if fault=='payment_latency' else proxy['enabled'] is False
+ if not observed:raise RuntimeError('fault configuration was not observed')
+ return {'injected':fault,'configuration_verified':observed,'cleanup_deadline_seconds':duration+5}
 
 def sql(service,query,database='commerce'):
  return run(['docker','exec',container(service),'psql','-U','postgres','-d',database,'-At','-c',query]).decode().strip()
 
 def state(service='postgres',database='commerce'):
- result=json.loads(sql(service,VERIFY_SQL,database));result['consistent']=result['invariant_violations']==0 and result['negative_stock']==0 and result['outstanding']==0
+ result=json.loads(sql(service,VERIFY_SQL,database));result['consistent']=result['invariant_violations']==0 and result['negative_stock']==0 and result['outstanding']==0 and result['pending_events']==0 and result['missing_deliveries']==0 and result['orphan_records']==0
  return result
 
 def backup():

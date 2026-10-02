@@ -16,7 +16,7 @@ make demo
 
 Open [the dashboard](http://localhost:5175). Its six screens use actual REST responses and SSE connection status. In Transactions choose a product, submit an order, inspect its lifecycle, and open its trace. Reusing the displayed key retries the same logical transaction; choose **New key** for another purchase. Check **Deterministic decline** to exercise compensation.
 
-In Experiments choose one of the six fixed faults and run it. The job starts laptop-sized load, observes baseline/failure/recovery, cleans up, and verifies consistency. Stop cancels the job and cleans resources; Recover also requests cleanup. In Reports inspect persisted evidence or download JSON/HTML. Unavailable metrics indicate insufficient samples, never a generated value.
+In Experiments choose one of the six fixed faults and run it. The job starts laptop-sized load, observes baseline/failure/recovery, cleans up, and verifies consistency. Stop cancels the job and cleans resources; Recover also requests cleanup. Automatic recovery stops traffic, replays up to 20 dead letters, and verifies durable event delivery alongside transaction consistency. Recovery offers an explicit bounded dead-letter replay button. In Reports inspect persisted evidence or download JSON/HTML. Unavailable metrics indicate insufficient samples, never a generated value.
 
 | Interface | Local URL |
 | --- | --- |
@@ -55,4 +55,4 @@ See [architecture](docs/architecture.md), [service contracts](docs/service-contr
 
 The optional kind path has namespace-scoped manual worker termination and network-fault scripts. Dashboard-triggered Compose operations and disaster-recovery automation are explicitly unavailable in kind. The primary Compose environment implements those operations.
 
-Runtime checks and actual results are recorded in [validation](docs/validation.md).
+Runtime checks and actual results are recorded in [validation](docs/validation.md). See the [engineering checkpoint](docs/engineering-completion.md) for the audit and corrections.
