@@ -1,0 +1,32 @@
+[
+  {
+    "name": "inventory",
+    "listen": "0.0.0.0:8081",
+    "upstream": "inventory:8080",
+    "enabled": true
+  },
+  {
+    "name": "payments",
+    "listen": "0.0.0.0:8082",
+    "upstream": "payments:8080",
+    "enabled": true
+  },
+  {
+    "name": "redis",
+    "listen": "0.0.0.0:6379",
+    "upstream": "redis:6379",
+    "enabled": true
+  },
+  {
+    "name": "rabbitmq",
+    "listen": "0.0.0.0:5672",
+    "upstream": "rabbitmq:5672",
+    "enabled": true
+  },
+  {
+    "name": "postgres",
+    "listen": "0.0.0.0:5432",
+    "upstream": "postgres:5432",
+    "enabled": true
+  }
+]

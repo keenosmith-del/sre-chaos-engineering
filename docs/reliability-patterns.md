@@ -1,0 +1,9 @@
+# Reliability mechanisms
+
+Dependency clients bound concurrency to 16 in-flight calls per service. `DEPENDENCY_TIMEOUT` defaults to 800 ms per attempt and can be overridden per Compose service. Calls have at most three attempts, exponential 100/200 ms backoff plus 0..99 ms jitter. HTTP 4xx (except 429) stops retries. Transport errors, 429 and 5xx consume the bounded budget. Stable operation IDs make retries safe. Caller cancellation is propagated.
+
+Circuits are keyed by dependency host/port rather than unique transaction URLs. Three failed logical calls open a circuit for five seconds; one half-open probe tests recovery. Other calls fail fast while open or probing. Gauges expose closed/open/half-open and a transition counter records changes. Concurrency and retry budgets cap pressure under faults. INVENTORY_TIMEOUT and PAYMENTS_TIMEOUT override the shared default per dependency; invalid values fail startup.
+
+The reconciler scans up to 20 incomplete orders every two seconds, using a 20-second pass budget. Pending reservations, ambiguous payments and incomplete compensation survive restart. A permanently unavailable dependency leaves durable unresolved orders for operator attention rather than claiming success. Outbox publication reconnects with a bounded delay. Worker reconnects independently, prefetches eight, retries database persistence three times and then dead-letters.
+
+HTTP servers apply body/header limits, read deadlines and graceful shutdown. SSE stays open with cancellation. JSON logs contain correlation IDs, trace IDs, service, route and response status. HTTP client spans and asynchronous consumer spans connect the complete workflow. Container liveness and SQL readiness distinguish a live process from an available database. This local workload has no authentication, authorization tenant model or external payment credentials.

@@ -1,0 +1,1 @@
+INSERT INTO inventory.products(id,name,price,stock) VALUES ('keyboard','Mechanical keyboard',7500,10000),('mouse','Wireless mouse',2500,10000),('monitor','27 inch monitor',25000,10000) ON CONFLICT (id) DO NOTHING;

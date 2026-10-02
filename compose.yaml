@@ -1,0 +1,160 @@
+name: reliability
+x-service: &service
+  restart: unless-stopped
+  networks: [application, telemetry]
+  healthcheck:
+    test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+    interval: 5s
+    timeout: 2s
+    retries: 12
+  deploy:
+    resources:
+      limits:
+        memory: 128M
+  depends_on:
+    postgres: {condition: service_healthy}
+    tox-init: {condition: service_completed_successfully}
+  environment: &env
+    OTEL_ENDPOINT: otel:4318
+    DEPENDENCY_TIMEOUT: 800ms
+    INVENTORY_TIMEOUT: ${INVENTORY_TIMEOUT:-800ms}
+    PAYMENTS_TIMEOUT: ${PAYMENTS_TIMEOUT:-800ms}
+    INVENTORY_URL: http://toxiproxy:8081
+    PAYMENTS_URL: http://toxiproxy:8082
+    REDIS_ADDR: toxiproxy:6379
+    AMQP_URL: amqp://demo:local_rabbit@toxiproxy:5672/
+services:
+  postgres:
+    image: postgres:16.8-alpine
+    environment: {POSTGRES_PASSWORD: local_admin, POSTGRES_DB: commerce}
+    volumes: [postgres:/var/lib/postgresql/data, ./db/migrations/001_init.sql:/docker-entrypoint-initdb.d/001.sql:ro]
+    networks: [application, administration]
+    healthcheck: {test: [CMD-SHELL, pg_isready -U postgres -d commerce], interval: 3s, timeout: 2s, retries: 20}
+  recovery-postgres:
+    image: postgres:16.8-alpine
+    environment: {POSTGRES_PASSWORD: local_recovery}
+    volumes: [recovery:/var/lib/postgresql/data]
+    networks: [administration]
+    healthcheck: {test: [CMD-SHELL, pg_isready -U postgres], interval: 3s, timeout: 2s, retries: 20}
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [redis:/data]
+    networks: [application]
+    healthcheck: {test: [CMD, redis-cli, ping], interval: 5s, timeout: 2s, retries: 10}
+  rabbitmq:
+    image: rabbitmq:3.13.7-management-alpine
+    environment: {RABBITMQ_DEFAULT_USER: demo, RABBITMQ_DEFAULT_PASS: local_rabbit}
+    volumes: [rabbitmq:/var/lib/rabbitmq, ./observability/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro, ./observability/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro]
+    ports: ['127.0.0.1:15672:15672']
+    networks: [application, telemetry]
+    healthcheck: {test: [CMD, rabbitmq-diagnostics, -q, ping], interval: 5s, timeout: 5s, retries: 20}
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    networks: [application, administration]
+  tox-init:
+    image: curlimages/curl:8.12.1
+    volumes: [./chaos/toxiproxy/proxies.json:/proxies.json:ro]
+    networks: [administration]
+    depends_on: [toxiproxy]
+    entrypoint: [/bin/sh, -c]
+    command: ['until curl -fsS http://toxiproxy:8474/version; do sleep 1; done; curl -fsS -X POST -H "Content-Type: application/json" --data-binary @/proxies.json http://toxiproxy:8474/populate']
+  gateway:
+    <<: *service
+    image: reliability-gateway:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: gateway}}
+    ports: ['127.0.0.1:8080:8080']
+  ordering:
+    <<: *service
+    image: reliability-ordering:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: ordering}}
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://ordering:local_ordering@toxiproxy:5432/commerce
+  inventory:
+    <<: *service
+    image: reliability-inventory:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: inventory}}
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://inventory:local_inventory@toxiproxy:5432/commerce
+  payments:
+    <<: *service
+    image: reliability-payments:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: payments}}
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://payments:local_payments@toxiproxy:5432/commerce
+  worker:
+    <<: *service
+    image: reliability-worker:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: worker}}
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://worker:local_worker@toxiproxy:5432/commerce
+  control:
+    <<: *service
+    image: reliability-control:local
+    build: {context: ., dockerfile: deploy/compose/service.Dockerfile, args: {SERVICE: control}}
+    networks: [application, administration, telemetry]
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://control:local_control@postgres:5432/commerce
+      RUNNER_URL: http://runner:8080
+      PROMETHEUS_URL: http://prometheus:9090
+    depends_on:
+      runner: {condition: service_started}
+      postgres: {condition: service_healthy}
+      tox-init: {condition: service_completed_successfully}
+  runner:
+    build: {context: ., dockerfile: deploy/compose/runner.Dockerfile}
+    restart: unless-stopped
+    networks: [administration]
+    volumes: [/var/run/docker.sock:/var/run/docker.sock, backups:/backups]
+    environment:
+      LOAD_DIRECTORY: ${PWD}/load/k6
+      RTO_TARGET_SECONDS: ${RTO_TARGET_SECONDS:-120}
+      RPO_TARGET_SECONDS: ${RPO_TARGET_SECONDS:-300}
+    depends_on:
+      tox-init: {condition: service_completed_successfully}
+      worker: {condition: service_started}
+      recovery-postgres: {condition: service_healthy}
+  dashboard:
+    build: {context: apps/dashboard}
+    ports: ['127.0.0.1:5175:80']
+    networks: [application]
+    depends_on: [gateway]
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: [--config=/etc/otel/config.yaml]
+    volumes: [./observability/otel/config.yaml:/etc/otel/config.yaml:ro]
+    networks: [telemetry]
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=3d]
+    volumes: [./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro, prometheus:/prometheus]
+    ports: ['127.0.0.1:9090:9090']
+    networks: [telemetry]
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment: {GF_AUTH_ANONYMOUS_ENABLED: 'true', GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer, GF_AUTH_DISABLE_LOGIN_FORM: 'true'}
+    volumes: [./observability/grafana/provisioning:/etc/grafana/provisioning:ro, grafana:/var/lib/grafana]
+    ports: ['127.0.0.1:3000:3000']
+    networks: [telemetry]
+  jaeger:
+    image: jaegertracing/all-in-one:1.67.0
+    environment: {COLLECTOR_OTLP_ENABLED: 'true'}
+    ports: ['127.0.0.1:16686:16686']
+    networks: [telemetry]
+networks:
+  application: {name: reliability_application}
+  administration: {internal: true}
+  telemetry: {}
+volumes:
+  postgres: {}
+  recovery: {}
+  redis: {}
+  rabbitmq: {}
+  backups: {}
+  prometheus: {}
+  grafana: {}

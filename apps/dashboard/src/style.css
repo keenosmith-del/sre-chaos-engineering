@@ -1,0 +1,5 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base { body {@apply bg-slate-100 text-slate-900;} button {@apply rounded bg-slate-800 text-white px-3 py-2 disabled:opacity-40;} input,select {@apply border rounded px-2 py-2 bg-white;} a {@apply text-blue-700 underline;} th,td {@apply text-left p-2 border-b;} label {@apply flex flex-col gap-1 text-sm;} }
+pre {white-space:pre-wrap;overflow-wrap:anywhere;}

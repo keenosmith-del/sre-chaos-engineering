@@ -1,0 +1,1963 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "reliability"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "database-init",
+        "namespace": "reliability"
+      },
+      "data": {
+        "001.sql": "CREATE ROLE ordering LOGIN PASSWORD 'local_ordering';\nCREATE ROLE inventory LOGIN PASSWORD 'local_inventory';\nCREATE ROLE payments LOGIN PASSWORD 'local_payments';\nCREATE ROLE worker LOGIN PASSWORD 'local_worker';\nCREATE ROLE control LOGIN PASSWORD 'local_control';\nCREATE SCHEMA AUTHORIZATION ordering;\nCREATE SCHEMA AUTHORIZATION inventory;\nCREATE SCHEMA AUTHORIZATION payments;\nCREATE SCHEMA AUTHORIZATION worker;\nCREATE SCHEMA AUTHORIZATION control;\nSET ROLE ordering;\nCREATE TABLE ordering.orders (\n id text PRIMARY KEY, idem text UNIQUE NOT NULL, hash text NOT NULL,\n product text NOT NULL, quantity integer NOT NULL CHECK(quantity>0), amount integer NOT NULL CHECK(amount>0),\n decline boolean NOT NULL DEFAULT false, state text NOT NULL CHECK(state IN ('PENDING','INVENTORY_RESERVED','PAYMENT_PENDING','CONFIRMED','RECONCILIATION_REQUIRED','COMPENSATING','CANCELLED','FAILED')),\n reason text NOT NULL DEFAULT '', trace_id text NOT NULL DEFAULT '', traceparent text NOT NULL DEFAULT '',\n created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE ordering.transitions (seq bigserial PRIMARY KEY, order_id text REFERENCES ordering.orders(id), state text NOT NULL, reason text NOT NULL DEFAULT '', at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE ordering.outbox (id text PRIMARY KEY REFERENCES ordering.orders(id), payload jsonb NOT NULL, headers jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), published_at timestamptz);\nRESET ROLE;\nSET ROLE inventory;\nCREATE TABLE inventory.products (id text PRIMARY KEY, name text NOT NULL, price integer NOT NULL CHECK(price>0), stock integer NOT NULL CHECK(stock>=0));\nCREATE TABLE inventory.reservations (id text PRIMARY KEY, product text REFERENCES inventory.products(id), quantity integer NOT NULL CHECK(quantity>0), active boolean NOT NULL DEFAULT true);\nINSERT INTO inventory.products VALUES ('keyboard','Mechanical keyboard',7500,10000),('mouse','Wireless mouse',2500,10000),('monitor','27 inch monitor',25000,10000);\nRESET ROLE;\nSET ROLE payments;\nCREATE TABLE payments.authorizations (id text PRIMARY KEY, amount integer NOT NULL CHECK(amount>0), decline boolean NOT NULL, status text NOT NULL CHECK(status IN ('AUTHORIZED','DECLINED')), at timestamptz NOT NULL DEFAULT now());\nRESET ROLE;\nSET ROLE worker;\nCREATE TABLE worker.deliveries (id text PRIMARY KEY, payload jsonb NOT NULL, at timestamptz NOT NULL DEFAULT now());\nRESET ROLE;\nSET ROLE control;\nCREATE TABLE control.experiments (id text PRIMARY KEY, state text NOT NULL, spec jsonb NOT NULL, evidence jsonb NOT NULL DEFAULT '[]', error text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());\nCREATE UNIQUE INDEX one_active_experiment ON control.experiments ((true)) WHERE state NOT IN ('COMPLETED','FAILED','ABORTED');\nCREATE TABLE control.transitions (seq bigserial PRIMARY KEY, experiment_id text NOT NULL REFERENCES control.experiments(id), state text NOT NULL, at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE control.load_runs (id text PRIMARY KEY, experiment_id text, profile text NOT NULL, state text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz);\nCREATE UNIQUE INDEX one_active_load ON control.load_runs ((true)) WHERE state='RUNNING';\nCREATE TABLE control.recovery (id text PRIMARY KEY, record jsonb NOT NULL, at timestamptz NOT NULL DEFAULT now());\nRESET ROLE;\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "toxiproxy-config",
+        "namespace": "reliability"
+      },
+      "data": {
+        "proxies.json": "[\n  {\n    \"name\": \"inventory\",\n    \"listen\": \"0.0.0.0:8081\",\n    \"upstream\": \"inventory:8080\",\n    \"enabled\": true\n  },\n  {\n    \"name\": \"payments\",\n    \"listen\": \"0.0.0.0:8082\",\n    \"upstream\": \"payments:8080\",\n    \"enabled\": true\n  },\n  {\n    \"name\": \"redis\",\n    \"listen\": \"0.0.0.0:6379\",\n    \"upstream\": \"redis:6379\",\n    \"enabled\": true\n  },\n  {\n    \"name\": \"rabbitmq\",\n    \"listen\": \"0.0.0.0:5672\",\n    \"upstream\": \"rabbitmq:5672\",\n    \"enabled\": true\n  },\n  {\n    \"name\": \"postgres\",\n    \"listen\": \"0.0.0.0:5432\",\n    \"upstream\": \"postgres:5432\",\n    \"enabled\": true\n  }\n]"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "otel-config",
+        "namespace": "reliability"
+      },
+      "data": {
+        "config.yaml": "receivers:\n  otlp:\n    protocols:\n      http: {endpoint: '0.0.0.0:4318'}\n      grpc: {endpoint: '0.0.0.0:4317'}\nprocessors:\n  batch: {}\nexporters:\n  otlp/jaeger:\n    endpoint: jaeger:4317\n    tls: {insecure: true}\nservice:\n  pipelines:\n    traces: {receivers: [otlp], processors: [batch], exporters: [otlp/jaeger]}\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "prometheus-config",
+        "namespace": "reliability"
+      },
+      "data": {
+        "prometheus.yml": "global:\n  scrape_interval: 3s\nscrape_configs:\n  - job_name: services\n    static_configs:\n      - targets: ['gateway:8080','ordering:8080','inventory:8080','payments:8080','worker:8080','control:8080']\n  - job_name: rabbitmq\n    static_configs:\n      - targets: ['rabbitmq:15692']\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "rabbitmq-config",
+        "namespace": "reliability"
+      },
+      "data": {
+        "rabbitmq.conf": "prometheus.return_per_object_metrics = true\ncollect_statistics_interval = 1000\n",
+        "enabled_plugins": "[rabbitmq_management,rabbitmq_prometheus].\n"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "local-demo",
+        "namespace": "reliability"
+      },
+      "type": "Opaque",
+      "stringData": {
+        "POSTGRES_PASSWORD": "local_admin",
+        "RABBITMQ_DEFAULT_USER": "demo",
+        "RABBITMQ_DEFAULT_PASS": "local_rabbit",
+        "ordering_DATABASE_URL": "postgres://ordering:local_ordering@toxiproxy:5432/commerce",
+        "inventory_DATABASE_URL": "postgres://inventory:local_inventory@toxiproxy:5432/commerce",
+        "payments_DATABASE_URL": "postgres://payments:local_payments@toxiproxy:5432/commerce",
+        "worker_DATABASE_URL": "postgres://worker:local_worker@toxiproxy:5432/commerce",
+        "control_DATABASE_URL": "postgres://control:local_control@toxiproxy:5432/commerce"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "postgres",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "1Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "redis",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "1Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "rabbitmq",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "1Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "postgres",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "Recreate"
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "postgres"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "postgres"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "postgres",
+                "image": "postgres:16.8-alpine",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 5432
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "POSTGRES_PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "POSTGRES_PASSWORD"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POSTGRES_DB",
+                    "value": "commerce"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "postgres",
+                    "mountPath": "/var/lib/postgresql/data"
+                  },
+                  {
+                    "name": "database-init",
+                    "mountPath": "/docker-entrypoint-initdb.d"
+                  }
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 5432
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 5432
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "postgres",
+                "persistentVolumeClaim": {
+                  "claimName": "postgres"
+                }
+              },
+              {
+                "name": "database-init",
+                "configMap": {
+                  "name": "database-init"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "postgres",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "postgres"
+        },
+        "ports": [
+          {
+            "name": "p5432",
+            "port": 5432,
+            "targetPort": 5432
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "redis",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "Recreate"
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "redis"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "redis"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "redis",
+                "image": "redis:7.4.2-alpine",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 6379
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "redis",
+                    "mountPath": "/data"
+                  }
+                ],
+                "args": [
+                  "redis-server",
+                  "--appendonly",
+                  "yes"
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 6379
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 6379
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "redis",
+                "persistentVolumeClaim": {
+                  "claimName": "redis"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "redis",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "redis"
+        },
+        "ports": [
+          {
+            "name": "p6379",
+            "port": 6379,
+            "targetPort": 6379
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "rabbitmq",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "Recreate"
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "rabbitmq"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "rabbitmq"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "rabbitmq",
+                "image": "rabbitmq:3.13.7-management-alpine",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 5672
+                  },
+                  {
+                    "containerPort": 15672
+                  },
+                  {
+                    "containerPort": 15692
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "RABBITMQ_DEFAULT_USER",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "RABBITMQ_DEFAULT_USER"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RABBITMQ_DEFAULT_PASS",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "RABBITMQ_DEFAULT_PASS"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "rabbitmq",
+                    "mountPath": "/var/lib/rabbitmq"
+                  },
+                  {
+                    "name": "rabbitmq-config",
+                    "mountPath": "/etc/rabbitmq/rabbitmq.conf",
+                    "subPath": "rabbitmq.conf"
+                  },
+                  {
+                    "name": "rabbitmq-config",
+                    "mountPath": "/etc/rabbitmq/enabled_plugins",
+                    "subPath": "enabled_plugins"
+                  }
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 5672
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 5672
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "rabbitmq",
+                "persistentVolumeClaim": {
+                  "claimName": "rabbitmq"
+                }
+              },
+              {
+                "name": "rabbitmq-config",
+                "configMap": {
+                  "name": "rabbitmq-config"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "rabbitmq",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "rabbitmq"
+        },
+        "ports": [
+          {
+            "name": "p5672",
+            "port": 5672,
+            "targetPort": 5672
+          },
+          {
+            "name": "p15672",
+            "port": 15672,
+            "targetPort": 15672
+          },
+          {
+            "name": "p15692",
+            "port": 15692,
+            "targetPort": 15692
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "toxiproxy",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "toxiproxy"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "toxiproxy"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "toxiproxy",
+                "image": "ghcr.io/shopify/toxiproxy:2.12.0",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8474
+                  },
+                  {
+                    "containerPort": 8081
+                  },
+                  {
+                    "containerPort": 8082
+                  },
+                  {
+                    "containerPort": 5432
+                  },
+                  {
+                    "containerPort": 5672
+                  },
+                  {
+                    "containerPort": 6379
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 8474
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 8474
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "toxiproxy",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "toxiproxy"
+        },
+        "ports": [
+          {
+            "name": "p8474",
+            "port": 8474,
+            "targetPort": 8474
+          },
+          {
+            "name": "p8081",
+            "port": 8081,
+            "targetPort": 8081
+          },
+          {
+            "name": "p8082",
+            "port": 8082,
+            "targetPort": 8082
+          },
+          {
+            "name": "p5432",
+            "port": 5432,
+            "targetPort": 5432
+          },
+          {
+            "name": "p5672",
+            "port": 5672,
+            "targetPort": 5672
+          },
+          {
+            "name": "p6379",
+            "port": 6379,
+            "targetPort": 6379
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "tox-init",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "backoffLimit": 10,
+        "template": {
+          "spec": {
+            "restartPolicy": "OnFailure",
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "toxiproxy-config",
+                "configMap": {
+                  "name": "toxiproxy-config"
+                }
+              }
+            ],
+            "containers": [
+              {
+                "name": "init",
+                "image": "curlimages/curl:8.12.1",
+                "volumeMounts": [
+                  {
+                    "name": "toxiproxy-config",
+                    "mountPath": "/config"
+                  }
+                ],
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "until curl -fsS http://toxiproxy:8474/version; do sleep 2; done; curl -fsS -X POST -H \"Content-Type: application/json\" --data-binary @/config/proxies.json http://toxiproxy:8474/populate"
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "20m",
+                    "memory": "16Mi"
+                  },
+                  "limits": {
+                    "cpu": "100m",
+                    "memory": "32Mi"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "gateway",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "gateway"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "gateway"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "gateway",
+                "image": "reliability-gateway:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "gateway",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "gateway"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "ordering",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "ordering"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "ordering"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "ordering",
+                "image": "reliability-ordering:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  },
+                  {
+                    "name": "DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "ordering_DATABASE_URL"
+                      }
+                    }
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "ordering",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "ordering"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "inventory",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "inventory"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "inventory"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "inventory",
+                "image": "reliability-inventory:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  },
+                  {
+                    "name": "DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "inventory_DATABASE_URL"
+                      }
+                    }
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "inventory",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "inventory"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "payments",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "payments"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "payments"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "payments",
+                "image": "reliability-payments:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  },
+                  {
+                    "name": "DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "payments_DATABASE_URL"
+                      }
+                    }
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "payments",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "payments"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "worker",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "worker"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "worker"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "worker",
+                "image": "reliability-worker:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  },
+                  {
+                    "name": "DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "worker_DATABASE_URL"
+                      }
+                    }
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "worker",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "worker"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "control",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "control"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "control"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "control",
+                "image": "reliability-control:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "OTEL_ENDPOINT",
+                    "value": "otel:4318"
+                  },
+                  {
+                    "name": "INVENTORY_URL",
+                    "value": "http://toxiproxy:8081"
+                  },
+                  {
+                    "name": "PAYMENTS_URL",
+                    "value": "http://toxiproxy:8082"
+                  },
+                  {
+                    "name": "AMQP_URL",
+                    "value": "amqp://demo:local_rabbit@toxiproxy:5672/"
+                  },
+                  {
+                    "name": "REDIS_ADDR",
+                    "value": "toxiproxy:6379"
+                  },
+                  {
+                    "name": "DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "local-demo",
+                        "key": "control_DATABASE_URL"
+                      }
+                    }
+                  },
+                  {
+                    "name": "RUNNER_URL",
+                    "value": "http://unsupported-runner:8080"
+                  },
+                  {
+                    "name": "PROMETHEUS_URL",
+                    "value": "http://prometheus:9090"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health/ready",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/health/live",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 15,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "control",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "control"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "dashboard",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "dashboard"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "dashboard"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "dashboard",
+                "image": "reliability-dashboard:local",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 80
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 80
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 80
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "dashboard",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "dashboard"
+        },
+        "ports": [
+          {
+            "name": "p80",
+            "port": 80,
+            "targetPort": 80
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "otel",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "otel"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "otel"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "otel",
+                "image": "otel/opentelemetry-collector-contrib:0.123.0",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 4318
+                  },
+                  {
+                    "containerPort": 4317
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "otel-config",
+                    "mountPath": "/etc/otel"
+                  }
+                ],
+                "args": [
+                  "--config=/etc/otel/config.yaml"
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 4318
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 4318
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "otel-config",
+                "configMap": {
+                  "name": "otel-config"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "otel",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "otel"
+        },
+        "ports": [
+          {
+            "name": "p4318",
+            "port": 4318,
+            "targetPort": 4318
+          },
+          {
+            "name": "p4317",
+            "port": 4317,
+            "targetPort": 4317
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "prometheus",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "prometheus"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "prometheus"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "prometheus",
+                "image": "prom/prometheus:v3.2.1",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 9090
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "prometheus-config",
+                    "mountPath": "/etc/prometheus"
+                  }
+                ],
+                "args": [
+                  "--config.file=/etc/prometheus/prometheus.yml"
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 9090
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 9090
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "prometheus-config",
+                "configMap": {
+                  "name": "prometheus-config"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "prometheus",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "prometheus"
+        },
+        "ports": [
+          {
+            "name": "p9090",
+            "port": 9090,
+            "targetPort": 9090
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "jaeger",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "jaeger"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "jaeger"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "jaeger",
+                "image": "jaegertracing/all-in-one:1.67.0",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 16686
+                  },
+                  {
+                    "containerPort": 4317
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "env": [
+                  {
+                    "name": "COLLECTOR_OTLP_ENABLED",
+                    "value": "true"
+                  }
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 16686
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 16686
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "jaeger",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "jaeger"
+        },
+        "ports": [
+          {
+            "name": "p16686",
+            "port": 16686,
+            "targetPort": 16686
+          },
+          {
+            "name": "p4317",
+            "port": 4317,
+            "targetPort": 4317
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "unsupported-runner-code",
+        "namespace": "reliability"
+      },
+      "data": {
+        "server.py": "from http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_POST(self):\n  self.send_response(501);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(b'{\"error\":\"Compose runner operations unavailable in kind. Use documented namespace-scoped kubectl experiments.\"}')\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\n"
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "unsupported-runner",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "replicas": 1,
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app": "unsupported-runner"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "unsupported-runner"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "unsupported-runner",
+                "image": "python:3.12.9-alpine",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "unsupported-runner-code",
+                    "mountPath": "/app"
+                  }
+                ],
+                "command": [
+                  "python",
+                  "/app/server.py"
+                ],
+                "readinessProbe": {
+                  "tcpSocket": {
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 5
+                },
+                "livenessProbe": {
+                  "tcpSocket": {
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10
+                }
+              }
+            ],
+            "automountServiceAccountToken": false,
+            "volumes": [
+              {
+                "name": "unsupported-runner-code",
+                "configMap": {
+                  "name": "unsupported-runner-code"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "unsupported-runner",
+        "namespace": "reliability"
+      },
+      "spec": {
+        "selector": {
+          "app": "unsupported-runner"
+        },
+        "ports": [
+          {
+            "name": "p8080",
+            "port": 8080,
+            "targetPort": 8080
+          }
+        ]
+      }
+    }
+  ]
+}
